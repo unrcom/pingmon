@@ -1,0 +1,27 @@
+# 環境変数（機密情報）
+.env
+*.env
+
+# SSH鍵
+*.pem
+*.key
+
+# ログファイル
+logs/
+*.log
+
+# Deno
+.deno/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# エディタ
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Supabase
+.supabase/

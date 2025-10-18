@@ -1,0 +1,9 @@
+{
+  "tasks": {
+    "start": "deno run --allow-net --allow-env --allow-sys --env-file worker.ts",
+    "dev": "deno run --allow-net --allow-env --allow-sys --env-file --watch worker.ts"
+  },
+  "imports": {
+    "postgres": "npm:postgres@3.4.4"
+  }
+}
