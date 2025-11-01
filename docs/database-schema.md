@@ -3,7 +3,7 @@
 **プロジェクト**: Pingmon - RestfulAPI 監視 SaaS  
 **データベース**: Supabase PostgreSQL  
 **リージョン**: ap-northeast-1（東京）  
-**最終更新**: 2025-10-19
+**最終更新**: 2025-10-30
 
 ---
 
@@ -22,15 +22,17 @@
 
 ## テーブル一覧
 
-| テーブル名              | 説明                 | 主キー    | 外部キー                                 |
-| ----------------------- | -------------------- | --------- | ---------------------------------------- |
-| `user_profiles`         | ユーザープロファイル | id (UUID) | auth.users(id)                           |
-| `monitors`              | 監視設定             | id (UUID) | user_profiles(id)                        |
-| `check_results`         | チェック結果履歴     | id (UUID) | monitors(id)                             |
-| `incidents`             | インシデント管理     | id (UUID) | monitors(id)                             |
-| `notification_channels` | 通知チャネル設定     | id (UUID) | user_profiles(id)                        |
-| `notification_logs`     | 通知履歴             | id (UUID) | incidents(id), notification_channels(id) |
-| `status_pages`          | 公開ステータスページ | id (UUID) | user_profiles(id)                        |
+| テーブル名                | 説明                      | 主キー    | 外部キー                                 |
+| ------------------------- | ------------------------- | --------- | ---------------------------------------- |
+| `user_profiles`           | ユーザープロファイル      | id (UUID) | auth.users(id)                           |
+| `monitors`                | 監視設定                  | id (UUID) | user_profiles(id)                        |
+| `check_results`           | チェック結果履歴          | id (UUID) | monitors(id)                             |
+| `incidents`               | インシデント管理          | id (UUID) | monitors(id)                             |
+| `notification_channels`   | 通知チャネル設定          | id (UUID) | user_profiles(id)                        |
+| `notification_logs`       | 通知履歴                  | id (UUID) | incidents(id), notification_channels(id) |
+| `status_pages`            | 公開ステータスページ      | id (UUID) | user_profiles(id)                        |
+| `workers`                 | Worker 情報管理           | id (TEXT) | なし                                     |
+| `monitor_worker_schedule` | Worker 別監視スケジュール | 複合キー  | monitors(id), workers(id)                |
 
 ---
 
@@ -66,8 +68,8 @@ CREATE TABLE user_profiles (
 | プラン | 最大監視数 | 最小チェック間隔 | データ保持期間 |
 |--------|-----------|----------------|--------------|
 | free | 5 | 3600 秒 (1 時間) | 7 日 |
-| pro | 50 | 300 秒 (5 分) | 30 日 |
-| max | 500 | 60 秒 (1 分) | 90 日 |
+| pro | 100 | 60 秒 (1 分) | 100 日 |
+| max | 999999 | 1 秒 | 99999 日 |
 
 ---
 
@@ -84,13 +86,11 @@ CREATE TABLE monitors (
   method VARCHAR(10) NOT NULL DEFAULT 'GET' CHECK (method IN ('GET', 'POST', 'PUT', 'DELETE', 'PATCH')),
   headers JSONB DEFAULT '{}',
   body TEXT,
-  check_interval_seconds INTEGER NOT NULL DEFAULT 3600,
   timeout_seconds INTEGER NOT NULL DEFAULT 30,
   expected_status_code INTEGER DEFAULT 200,
   expected_body_contains TEXT,
   is_active BOOLEAN NOT NULL DEFAULT true,
   last_checked_at TIMESTAMPTZ,
-  next_check_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -104,13 +104,16 @@ CREATE TABLE monitors (
 - `method`: HTTP メソッド
 - `headers`: カスタムヘッダー（JSON）
 - `body`: リクエストボディ
-- `check_interval_seconds`: チェック間隔（秒）
 - `timeout_seconds`: タイムアウト時間（秒）
 - `expected_status_code`: 期待するステータスコード
 - `expected_body_contains`: レスポンスボディに含まれるべき文字列
 - `is_active`: 監視の有効/無効
 - `last_checked_at`: 最後にチェックした日時
-- `next_check_at`: 次回チェック予定日時
+
+**注意**:
+
+- ❌ `check_interval_seconds`: 削除（Worker 別スケジュールに移行）
+- ❌ `next_check_at`: 削除（Worker 別スケジュールに移行）
 
 ---
 
@@ -128,6 +131,7 @@ CREATE TABLE check_results (
   success BOOLEAN NOT NULL,
   error_message TEXT,
   response_body_sample TEXT,
+  worker_id VARCHAR(50),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
@@ -141,6 +145,91 @@ CREATE TABLE check_results (
 - `success`: チェック成功/失敗
 - `error_message`: エラーメッセージ
 - `response_body_sample`: レスポンスボディのサンプル
+- `worker_id`: チェックを実行した Worker の識別子（例: aws-tyo1a, gcp-tyo1a, azure-tyo1）
+
+---
+
+### workers
+
+Worker 情報を管理するテーブル
+
+```sql
+CREATE TABLE workers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+**カラム説明**:
+
+- `id`: Worker 識別子（例: aws-tyo1a, gcp-tyo1a, azure-tyo1）
+- `name`: Worker 表示名（ダッシュボード用）
+- `is_active`: Worker が有効かどうか
+- `created_at`: 作成日時
+- `updated_at`: 更新日時（自動更新）
+
+**Worker ID 形式**:
+
+```
+{provider}-{short_region}{az}
+
+例:
+- aws-tyo1a  (AWS Tokyo ap-northeast-1a)
+- gcp-tyo1a  (GCP Tokyo asia-northeast1-a)
+- azure-tyo1 (Azure Tokyo japaneast zone 1)
+```
+
+**登録済み Worker**:
+| ID | 名前 | 説明 |
+|----|------|------|
+| aws-tyo1a | 東京リージョン 1a (AWS) | AWS ap-northeast-1a |
+| gcp-tyo1a | 東京リージョン 1a (GCP) | GCP asia-northeast1-a |
+| azure-tyo1 | 東京リージョン 1 (Azure) | Azure japaneast zone 1 |
+
+**認証方式**:
+
+- Worker 認証は共通の API キー（`PINGMON_WORKER_API_KEY`）で行います
+- Worker 識別はリクエストボディの `worker_id` フィールドで行います
+
+---
+
+### monitor_worker_schedule
+
+Worker 別の監視スケジュールを管理
+
+```sql
+CREATE TABLE monitor_worker_schedule (
+  monitor_id UUID NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+  worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  check_minute INTEGER NOT NULL CHECK (check_minute >= 0 AND check_minute <= 59),
+  check_second INTEGER NOT NULL CHECK (check_second >= 0 AND check_second <= 59),
+  check_interval_seconds INTEGER NOT NULL CHECK (check_interval_seconds > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (monitor_id, worker_id)
+);
+```
+
+**カラム説明**:
+
+- `monitor_id`: 監視設定 ID
+- `worker_id`: Worker 識別子
+- `check_minute`: 監視実行時刻（分: 0-59）
+- `check_second`: 監視実行時刻（秒: 0-59）
+- `check_interval_seconds`: 監視間隔（秒）
+
+**スケジュール例**:
+
+```
+aws-tyo1a:   毎時 0:00, 5:00, 10:00... (5分間隔)
+gcp-tyo1a:   毎時 2:00, 7:00, 12:00... (5分間隔、2分オフセット)
+azure-tyo1:  毎時 4:00, 9:00, 14:00... (5分間隔、4分オフセット)
+```
+
+→ 各 Worker のリクエストが 2 分ずつズレて負荷分散
 
 ---
 
@@ -287,10 +376,13 @@ user_profiles
     ├─→ monitors
     │      ↓ (1:N)
     │      ├─→ check_results
-    │      └─→ incidents
-    │             ↓ (1:N)
-    │          notification_logs
-    │             ↑
+    │      ├─→ incidents
+    │      │      ↓ (1:N)
+    │      │   notification_logs
+    │      │      ↑
+    │      └─→ monitor_worker_schedule
+    │             ↓ (N:1)
+    │          workers
     ├─→ notification_channels ─┘
     └─→ status_pages
 ```
@@ -328,6 +420,14 @@ user_profiles
 - SELECT: 自分のページ **または** 公開ページ
 - INSERT/UPDATE/DELETE: 自分のページのみ
 
+#### workers
+
+- SELECT: 全ユーザーが閲覧可能
+
+#### monitor_worker_schedule
+
+- SELECT/INSERT/UPDATE/DELETE: 自分が所有する監視設定のスケジュールのみ
+
 ---
 
 ## インデックス
@@ -339,13 +439,17 @@ user_profiles
 CREATE INDEX idx_check_results_monitor_checked
   ON check_results(monitor_id, checked_at DESC);
 
+-- Worker別の分析用
+CREATE INDEX idx_check_results_worker
+  ON check_results(worker_id, checked_at DESC);
+
+-- 監視設定とWorker別の結果取得
+CREATE INDEX idx_check_results_monitor_worker
+  ON check_results(monitor_id, worker_id, checked_at DESC);
+
 -- ユーザーごとのアクティブな監視設定
 CREATE INDEX idx_monitors_user_active
   ON monitors(user_id, is_active);
-
--- 次回チェック予定のワーカー用
-CREATE INDEX idx_monitors_next_check
-  ON monitors(next_check_at) WHERE is_active = true;
 
 -- インシデント検索
 CREATE INDEX idx_incidents_monitor_status
@@ -354,6 +458,17 @@ CREATE INDEX idx_incidents_monitor_status
 -- ステータスページのスラッグ検索
 CREATE INDEX idx_status_pages_slug
   ON status_pages(slug);
+
+-- Workerの有効/無効検索
+CREATE INDEX idx_workers_is_active
+  ON workers(is_active);
+
+-- Worker別のスケジュール検索
+CREATE INDEX idx_monitor_worker_schedule_worker_id
+  ON monitor_worker_schedule(worker_id);
+
+CREATE INDEX idx_monitor_worker_schedule_monitor_id
+  ON monitor_worker_schedule(monitor_id);
 ```
 
 ---
@@ -405,7 +520,8 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- 以下のテーブルに適用
--- user_profiles, monitors, incidents, notification_channels, status_pages
+-- user_profiles, monitors, incidents, notification_channels, status_pages,
+-- workers, monitor_worker_schedule
 ```
 
 ---
@@ -469,7 +585,7 @@ const { data: profile } = await supabase
   .single();
 
 console.log(profile.plan); // 'free' | 'pro' | 'max'
-console.log(profile.max_monitors); // 5 | 50 | 500
+console.log(profile.max_monitors); // 5 | 100 | 999999
 ```
 
 ### 監視設定の作成
@@ -482,7 +598,6 @@ const { data: monitor } = await supabase
     name: "My API",
     url: "https://api.example.com/health",
     method: "GET",
-    check_interval_seconds: 3600,
     expected_status_code: 200,
   })
   .select()
@@ -496,6 +611,18 @@ const { data: results } = await supabase
   .from("check_results")
   .select("*, monitors(name, url)")
   .eq("monitor_id", monitorId)
+  .order("checked_at", { ascending: false })
+  .limit(10);
+```
+
+### Worker 別のチェック結果取得
+
+```typescript
+const { data: results } = await supabase
+  .from("check_results")
+  .select("*")
+  .eq("monitor_id", monitorId)
+  .eq("worker_id", "aws-tyo1a")
   .order("checked_at", { ascending: false })
   .limit(10);
 ```
@@ -540,10 +667,13 @@ const { data: statusPage } = await supabase
 
 ## マイグレーション履歴
 
-| 日付       | ファイル名                             | 内容                 |
-| ---------- | -------------------------------------- | -------------------- |
-| 2025-10-18 | `20251018015707_initial_schema.sql`    | 初期スキーマ作成     |
-| 2025-10-19 | `add_plan_limits_to_user_profiles.sql` | プラン制限カラム追加 |
+| 日付       | ファイル名                                            | 内容                                          |
+| ---------- | ----------------------------------------------------- | --------------------------------------------- |
+| 2025-10-18 | `20251018015707_initial_schema.sql`                   | 初期スキーマ作成                              |
+| 2025-10-19 | `20251019022942_add_plan_limits_to_user_profiles.sql` | プラン制限カラム追加                          |
+| 2025-10-25 | `20251025094051_add_worker_id_to_check_results.sql`   | check_results に worker_id 追加               |
+| 2025-10-26 | `20251026024028_worker_schedule_redesign.sql`         | workers, monitor_worker_schedule テーブル作成 |
+| 2025-10-30 | `20251030232315_workers_table_redesign_az.sql`        | workers テーブル再設計（AZ 対応、構造簡素化） |
 
 ---
 
