@@ -7,32 +7,20 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-pingmon-api-key",
 };
 
-interface CheckResult {
-  monitor_id: string;
-  checked_at: string;
-  status_code: number | null;
-  response_time_ms: number | null;
-  success: boolean;
-  error_message: string | null;
-  response_body_sample: string | null;
-  worker_id: string;
-}
-
 // 構造化ログ出力関数
 function logMetrics(metrics: {
   request_id: string;
   timestamp: string;
-  worker_ids?: string[];
+  worker_id?: string;
   status_code: number;
   response_type: "success" | "error";
   error_code?: string;
   duration_ms: number;
-  inserted_count?: number;
   monitors_count?: number;
 }) {
   console.log(JSON.stringify({
     ...metrics,
-    function_name: "batch-save-results",
+    function_name: "get-monitors-to-check",
   }));
 }
 
@@ -66,7 +54,13 @@ serve(async (req) => {
       });
 
       return new Response(
-        JSON.stringify({ error: "Unauthorized" }),
+        JSON.stringify({
+          success: false,
+          error: {
+            code: "UNAUTHORIZED",
+            message: "Invalid API key",
+          },
+        }),
         {
           status: 401,
           headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -75,10 +69,10 @@ serve(async (req) => {
     }
 
     // リクエストボディの取得
-    const { check_results } = await req.json();
+    const { worker_id } = await req.json();
 
-    // バリデーション
-    if (!Array.isArray(check_results) || check_results.length === 0) {
+    // バリデーション：worker_idが必須
+    if (!worker_id) {
       const duration = Date.now() - startTime;
 
       logMetrics({
@@ -92,67 +86,17 @@ serve(async (req) => {
 
       return new Response(
         JSON.stringify({
-          error: "check_results must be a non-empty array",
-        }),
-        {
-          status: 400,
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        },
-      );
-    }
-
-    // バリデーション：最大件数チェック（DoS対策）
-    if (check_results.length > 1000) {
-      const duration = Date.now() - startTime;
-
-      logMetrics({
-        request_id: requestId,
-        timestamp,
-        status_code: 400,
-        response_type: "error",
-        error_code: "TOO_MANY_RESULTS",
-        duration_ms: duration,
-      });
-
-      return new Response(
-        JSON.stringify({
-          error: "Too many results. Maximum 1000 per request.",
-        }),
-        {
-          status: 400,
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        },
-      );
-    }
-
-    // 各結果の必須フィールドをバリデーション
-    for (const result of check_results) {
-      if (
-        !result.monitor_id || !result.worker_id ||
-        typeof result.success !== "boolean"
-      ) {
-        const duration = Date.now() - startTime;
-
-        logMetrics({
-          request_id: requestId,
-          timestamp,
-          status_code: 400,
-          response_type: "error",
-          error_code: "INVALID_FORMAT",
-          duration_ms: duration,
-        });
-
-        return new Response(
-          JSON.stringify({
-            error:
-              "Invalid check_result format. Required: monitor_id, worker_id, success",
-          }),
-          {
-            status: 400,
-            headers: { "Content-Type": "application/json", ...corsHeaders },
+          success: false,
+          error: {
+            code: "INVALID_REQUEST",
+            message: "worker_id is required",
           },
-        );
-      }
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        },
+      );
     }
 
     // Supabase Clientの初期化（Service Role Key使用）
@@ -160,32 +104,115 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const workerIds = [...new Set(check_results.map((r) => r.worker_id))];
-    const monitorIds = [...new Set(check_results.map((r) => r.monitor_id))];
+    // Worker存在確認
+    const { data: worker, error: workerError } = await supabase
+      .from("workers")
+      .select("id, is_active")
+      .eq("id", worker_id)
+      .single();
 
-    // バッチINSERT
-    const { data, error } = await supabase
-      .from("check_results")
-      .insert(check_results);
-
-    if (error) {
+    if (workerError || !worker) {
       const duration = Date.now() - startTime;
-      console.error("Database insert error:", error);
+      console.error(`Worker not found: ${worker_id}`);
 
       logMetrics({
         request_id: requestId,
         timestamp,
-        worker_ids: workerIds,
-        status_code: 500,
+        worker_id,
+        status_code: 404,
         response_type: "error",
-        error_code: "DATABASE_ERROR",
+        error_code: "WORKER_NOT_FOUND",
         duration_ms: duration,
       });
 
       return new Response(
         JSON.stringify({
-          error: "Database insert failed",
-          details: error.message,
+          success: false,
+          error: {
+            code: "WORKER_NOT_FOUND",
+            message: "Worker not found",
+          },
+        }),
+        {
+          status: 404,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        },
+      );
+    }
+
+    // Worker有効性チェック
+    if (!worker.is_active) {
+      const duration = Date.now() - startTime;
+      console.error(`Worker is not active: ${worker_id}`);
+
+      logMetrics({
+        request_id: requestId,
+        timestamp,
+        worker_id,
+        status_code: 403,
+        response_type: "error",
+        error_code: "WORKER_INACTIVE",
+        duration_ms: duration,
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: {
+            code: "WORKER_INACTIVE",
+            message: "Worker is not active",
+          },
+        }),
+        {
+          status: 403,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        },
+      );
+    }
+
+    // 監視対象取得（monitors + monitor_worker_schedule JOIN）
+    const { data: monitors, error: monitorsError } = await supabase
+      .from("monitors")
+      .select(`
+        id,
+        name,
+        url,
+        method,
+        headers,
+        body,
+        timeout_seconds,
+        expected_status_code,
+        expected_body_contains,
+        monitor_worker_schedule!inner (
+          check_minute,
+          check_second,
+          check_interval_seconds
+        )
+      `)
+      .eq("monitor_worker_schedule.worker_id", worker_id)
+      .eq("is_active", true);
+
+    if (monitorsError) {
+      const duration = Date.now() - startTime;
+      console.error("Database query error:", monitorsError);
+
+      logMetrics({
+        request_id: requestId,
+        timestamp,
+        worker_id,
+        status_code: 500,
+        response_type: "error",
+        error_code: "INTERNAL_ERROR",
+        duration_ms: duration,
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: {
+            code: "INTERNAL_ERROR",
+            message: "Database connection failed",
+          },
         }),
         {
           status: 500,
@@ -194,32 +221,46 @@ serve(async (req) => {
       );
     }
 
+    // レスポンスデータの整形
+    const formattedMonitors = (monitors || []).map((m) => ({
+      monitor_id: m.id,
+      name: m.name,
+      url: m.url,
+      method: m.method,
+      headers: m.headers || {},
+      body: m.body,
+      timeout_seconds: m.timeout_seconds,
+      expected_status_code: m.expected_status_code,
+      expected_body_contains: m.expected_body_contains,
+      check_minute: m.monitor_worker_schedule[0].check_minute,
+      check_second: m.monitor_worker_schedule[0].check_second,
+      check_interval_seconds: m.monitor_worker_schedule[0]
+        .check_interval_seconds,
+    }));
+
     const duration = Date.now() - startTime;
 
     // 構造化ログ出力
     logMetrics({
       request_id: requestId,
       timestamp,
-      worker_ids: workerIds,
+      worker_id,
       status_code: 200,
       response_type: "success",
       duration_ms: duration,
-      inserted_count: check_results.length,
-      monitors_count: monitorIds.length,
+      monitors_count: formattedMonitors.length,
     });
 
     // 従来のログも出力（互換性のため）
-    console.log(
-      `[${
-        workerIds.join(", ")
-      }] Successfully inserted ${check_results.length} check results ` +
-        `(monitors: ${monitorIds.length})`,
-    );
+    console.log(`[${worker_id}] Returned ${formattedMonitors.length} monitors`);
 
     return new Response(
       JSON.stringify({
         success: true,
-        inserted: check_results.length,
+        data: {
+          worker_id: worker_id,
+          monitors: formattedMonitors,
+        },
       }),
       {
         status: 200,
@@ -241,8 +282,11 @@ serve(async (req) => {
 
     return new Response(
       JSON.stringify({
-        error: "Internal server error",
-        message: error instanceof Error ? error.message : "Unknown error",
+        success: false,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: error instanceof Error ? error.message : "Unknown error",
+        },
       }),
       {
         status: 500,

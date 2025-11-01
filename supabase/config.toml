@@ -356,3 +356,14 @@ entrypoint = "./functions/batch-save-results/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/batch-save-results/*.html" ]
+
+[functions.get-monitors-to-check]
+enabled = true
+verify_jwt = true
+import_map = "./functions/get-monitors-to-check/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/get-monitors-to-check/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/get-monitors-to-check/*.html" ]
