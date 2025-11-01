@@ -170,7 +170,9 @@ serve(async (req) => {
       );
     }
 
-    // 監視対象取得（monitors + monitor_worker_schedule JOIN）
+    // ============================================================
+    // 🔧 変更1: user_profiles を JOIN に追加
+    // ============================================================
     const { data: monitors, error: monitorsError } = await supabase
       .from("monitors")
       .select(`
@@ -187,6 +189,9 @@ serve(async (req) => {
           check_minute,
           check_second,
           check_interval_seconds
+        ),
+        user_profiles!inner (
+          plan
         )
       `)
       .eq("monitor_worker_schedule.worker_id", worker_id)
@@ -221,8 +226,10 @@ serve(async (req) => {
       );
     }
 
-    // レスポンスデータの整形
-    const formattedMonitors = (monitors || []).map((m) => ({
+    // ============================================================
+    // 🔧 変更2: レスポンス整形に user_plan を追加
+    // ============================================================
+    const formattedMonitors = (monitors || []).map((m: any) => ({ // ← any を追加
       monitor_id: m.id,
       name: m.name,
       url: m.url,
@@ -234,8 +241,9 @@ serve(async (req) => {
       expected_body_contains: m.expected_body_contains,
       check_minute: m.monitor_worker_schedule[0].check_minute,
       check_second: m.monitor_worker_schedule[0].check_second,
-      check_interval_seconds: m.monitor_worker_schedule[0]
-        .check_interval_seconds,
+      check_interval_seconds:
+        m.monitor_worker_schedule[0].check_interval_seconds,
+      user_plan: m.user_profiles?.[0]?.plan || m.user_profiles?.plan || "free", // ← 修正
     }));
 
     const duration = Date.now() - startTime;
