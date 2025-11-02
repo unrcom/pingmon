@@ -28,3 +28,5 @@ Thumbs.db
 logs/
 supabase/functions/**/.npmrc
 supabase/functions/**/deno.json
+worker.old/
+worker/.env
