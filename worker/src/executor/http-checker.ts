@@ -1,17 +1,41 @@
 import { MonitorWithPlan } from '../types/monitor.ts';
 import { CheckExecutionResult } from '../types/check-result.ts';
 import { Logger } from '../logger/logger.ts';
+import { TaskManager } from './task-manager.ts';
 
 export class HttpChecker {
-  constructor(private logger: Logger) {}
+  private readonly logger: Logger;
+  private readonly taskManager: TaskManager;
+
+  constructor(logger: Logger, taskManager: TaskManager) {
+    this.logger = logger;
+    this.taskManager = taskManager;
+  }
 
   async execute(monitor: MonitorWithPlan): Promise<CheckExecutionResult> {
+    const taskId = crypto.randomUUID();
+    const controller = new AbortController();
     const startTime = Date.now();
 
-    try {
-      const controller = new AbortController();
+    // タスクを登録
+    this.taskManager.register({
+      task_id: taskId,
+      monitor_id: monitor.monitor_id,
+      monitor_name: monitor.name,
+      started_at: new Date(),
+      timeout_ms: monitor.timeout_seconds * 1000,
+      abort_controller: controller,
+      onTimeout: (elapsed_ms: number) => {
+        this.logger.error('Task was force cancelled', {
+          task_id: taskId,
+          monitor_id: monitor.monitor_id,
+          monitor_name: monitor.name,
+          elapsed_ms,
+        });
+      },
+    });
 
-      // 🔧 修正: Promise.raceで確実にタイムアウト
+    try {
       const fetchPromise = fetch(monitor.url, {
         method: monitor.method,
         headers: monitor.headers,
@@ -55,6 +79,7 @@ export class HttpChecker {
       }
 
       this.logger.debug('Check executed', {
+        task_id: taskId,
         monitor_id: monitor.monitor_id,
         monitor_name: monitor.name,
         url: monitor.url,
@@ -62,6 +87,9 @@ export class HttpChecker {
         response_time_ms: responseTime,
         success,
       });
+
+      // タスク完了を通知
+      this.taskManager.complete(taskId);
 
       return {
         success,
@@ -75,12 +103,16 @@ export class HttpChecker {
       const errorMessage = error instanceof Error ? error.message : String(error);
 
       this.logger.warn('Check failed', {
+        task_id: taskId,
         monitor_id: monitor.monitor_id,
         monitor_name: monitor.name,
         url: monitor.url,
         error: errorMessage,
         response_time_ms: responseTime,
       });
+
+      // タスク完了を通知
+      this.taskManager.complete(taskId);
 
       return {
         success: false,

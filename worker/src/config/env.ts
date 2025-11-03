@@ -6,10 +6,11 @@ export interface WorkerConfig {
   retry: RetryConfig;
   batcher: BatcherConfig;
   reload: ReloadConfig;
+  task: TaskConfig; // ← 追加
 }
 
 export interface QueueConfig {
-  strategy: 'weighted' | 'strict';
+  strategy: "weighted" | "strict";
   maxConcurrent: number;
   planSettings: {
     max: PlanSettings;
@@ -40,9 +41,17 @@ export interface ReloadConfig {
   intervalMs: number;
 }
 
-const DEFAULT_CONFIG: Omit<WorkerConfig, 'workerId' | 'supabaseUrl' | 'apiKey'> = {
+export interface TaskConfig {
+  forceCancelBufferSeconds: number;
+  monitorIntervalMs: number;
+}
+
+const DEFAULT_CONFIG: Omit<
+  WorkerConfig,
+  "workerId" | "supabaseUrl" | "apiKey"
+> = {
   queue: {
-    strategy: 'weighted',
+    strategy: "weighted",
     maxConcurrent: 50,
     planSettings: {
       max: { jitterMaxSeconds: 5, queueWeight: 0.5 },
@@ -62,21 +71,34 @@ const DEFAULT_CONFIG: Omit<WorkerConfig, 'workerId' | 'supabaseUrl' | 'apiKey'> 
     maxWaitMs: 60000,
   },
   reload: { intervalMs: 300000 },
+  task: { // ← 追加
+    forceCancelBufferSeconds: 10, // デフォルト10秒
+    monitorIntervalMs: 5000, // 5秒ごとに監視
+  },
 };
 
 export function loadConfig(): WorkerConfig {
-  const workerId = Deno.env.get('WORKER_ID');
-  if (!workerId) throw new Error('WORKER_ID is required');
+  const workerId = Deno.env.get("WORKER_ID");
+  if (!workerId) throw new Error("WORKER_ID is required");
 
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
-  if (!supabaseUrl) throw new Error('SUPABASE_URL is required');
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  if (!supabaseUrl) throw new Error("SUPABASE_URL is required");
 
-  const apiKey = Deno.env.get('PINGMON_WORKER_API_KEY');
-  if (!apiKey) throw new Error('PINGMON_WORKER_API_KEY is required');
+  const apiKey = Deno.env.get("PINGMON_WORKER_API_KEY");
+  if (!apiKey) throw new Error("PINGMON_WORKER_API_KEY is required");
 
-  const queueStrategy = Deno.env.get('QUEUE_STRATEGY') as 'weighted' | 'strict' | undefined;
-  const maxConcurrent = parseInt(Deno.env.get('MAX_CONCURRENT_CHECKS') || '50');
-  const reloadInterval = parseInt(Deno.env.get('RELOAD_INTERVAL_MS') || '300000');
+  const queueStrategy = Deno.env.get("QUEUE_STRATEGY") as
+    | "weighted"
+    | "strict"
+    | undefined;
+  const maxConcurrent = parseInt(Deno.env.get("MAX_CONCURRENT_CHECKS") || "50");
+  const reloadInterval = parseInt(
+    Deno.env.get("RELOAD_INTERVAL_MS") || "300000",
+  );
+
+  const forceCancelBuffer = parseInt(
+    Deno.env.get("FORCE_CANCEL_BUFFER_SECONDS") || "10",
+  );
 
   return {
     workerId,
@@ -85,12 +107,22 @@ export function loadConfig(): WorkerConfig {
     queue: {
       ...DEFAULT_CONFIG.queue,
       strategy: queueStrategy || DEFAULT_CONFIG.queue.strategy,
-      maxConcurrent: isNaN(maxConcurrent) ? DEFAULT_CONFIG.queue.maxConcurrent : maxConcurrent,
+      maxConcurrent: isNaN(maxConcurrent)
+        ? DEFAULT_CONFIG.queue.maxConcurrent
+        : maxConcurrent,
     },
     retry: DEFAULT_CONFIG.retry,
     batcher: DEFAULT_CONFIG.batcher,
     reload: {
-      intervalMs: isNaN(reloadInterval) ? DEFAULT_CONFIG.reload.intervalMs : reloadInterval,
+      intervalMs: isNaN(reloadInterval)
+        ? DEFAULT_CONFIG.reload.intervalMs
+        : reloadInterval,
+    },
+    task: { // ← 追加
+      forceCancelBufferSeconds: isNaN(forceCancelBuffer)
+        ? DEFAULT_CONFIG.task.forceCancelBufferSeconds
+        : forceCancelBuffer,
+      monitorIntervalMs: DEFAULT_CONFIG.task.monitorIntervalMs,
     },
   };
 }

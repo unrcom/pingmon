@@ -4,6 +4,7 @@ import { MonitorsClient } from './api/monitors.ts';
 import { ResultsClient } from './api/results.ts';
 import { Scheduler } from './scheduler/scheduler.ts';
 import { ResultBatcher } from './batcher/result-batcher.ts';
+import { TaskManager } from './executor/task-manager.ts';
 
 async function main() {
   const config = loadConfig();
@@ -13,6 +14,7 @@ async function main() {
     worker_id: config.workerId,
     queue_strategy: config.queue.strategy,
     max_concurrent: config.queue.maxConcurrent,
+    force_cancel_buffer_seconds: config.task.forceCancelBufferSeconds,
   });
 
   const monitorsClient = new MonitorsClient(config, logger);
@@ -20,11 +22,16 @@ async function main() {
 
   const batcher = new ResultBatcher(config.batcher, resultsClient, logger);
 
+  // TaskManager を初期化
+  const taskManager = new TaskManager(config.task, logger);
+  taskManager.start();
+
   logger.info('Loading monitors');
   const monitors = await monitorsClient.getMonitorsToCheck(config.workerId);
 
   if (monitors.length === 0) {
     logger.warn('No monitors to check');
+    taskManager.stop();
     return;
   }
 
@@ -32,6 +39,7 @@ async function main() {
     config.workerId,
     config.queue,
     logger,
+    taskManager,
     (result) => {
       batcher.add(result);
     }
@@ -55,10 +63,12 @@ async function main() {
   const statsInterval = setInterval(() => {
     const schedulerStats = scheduler.getStats();
     const batcherStats = batcher.getStats();
+    const taskStats = taskManager.getStats();
 
     logger.info('Worker statistics', {
       scheduler: schedulerStats,
       batcher: batcherStats,
+      tasks: taskStats,
     });
   }, 60000);
 
@@ -69,6 +79,8 @@ async function main() {
     clearInterval(statsInterval);
 
     scheduler.stop();
+
+    taskManager.stop();
 
     await batcher.stop();
 

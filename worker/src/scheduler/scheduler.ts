@@ -1,6 +1,7 @@
 import { MonitorWithPlan } from '../types/monitor.ts';
 import { PriorityQueueManager, QueuedCheck } from './priority-queue.ts';
 import { HttpChecker } from '../executor/http-checker.ts';
+import { TaskManager } from '../executor/task-manager.ts';
 import { CheckResult } from '../types/check-result.ts';
 import { QueueConfig } from '../config/env.ts';
 import { Logger } from '../logger/logger.ts';
@@ -18,12 +19,13 @@ export class Scheduler {
     workerId: string,
     queueConfig: QueueConfig,
     logger: Logger,
+    taskManager: TaskManager,
     onResult: (result: CheckResult) => void
   ) {
     this.workerId = workerId;
     this.logger = logger;
     this.onResult = onResult;
-    this.checker = new HttpChecker(logger);
+    this.checker = new HttpChecker(logger, taskManager);
 
     this.queue = new PriorityQueueManager(queueConfig, async (check: QueuedCheck) => {
       await this.executeCheck(check);
