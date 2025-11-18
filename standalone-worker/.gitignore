@@ -1,0 +1,23 @@
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Deno
+.deno/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# Exports
+exports/
+*.json.backup
+
+# OS
+.DS_Store
+Thumbs.db
